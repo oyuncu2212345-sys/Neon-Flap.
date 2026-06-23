@@ -1,0 +1,220 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ ana ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Create Android Project
+        run: |
+          mkdir -p app/src/main/assets
+          mkdir -p app/src/main/res/layout
+          cp index.html app/src/main/assets/index.html
+
+      - name: Create MainActivity
+        run: |
+          mkdir -p app/src/main/java/com/neonflap/game
+          cat > app/src/main/java/com/neonflap/game/MainActivity.java << 'EOF'
+          package com.neonflap.game;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import com.google.android.gms.ads.MobileAds;
+          import com.google.android.gms.ads.AdRequest;
+          import com.google.android.gms.ads.LoadAdError;
+          import com.google.android.gms.ads.FullScreenContentCallback;
+          import com.google.android.gms.ads.rewarded.RewardedAd;
+          import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback;
+          import com.google.android.gms.ads.OnUserEarnedRewardListener;
+
+          public class MainActivity extends Activity {
+            WebView webView;
+            RewardedAd rewardedAd;
+            private static final String AD_UNIT_ID = "ca-app-pub-4510153315383389/4262758761";
+            boolean rewardEarned = false;
+
+            @Override
+            protected void onCreate(Bundle savedInstanceState) {
+              super.onCreate(savedInstanceState);
+              getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+              getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN |
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+
+              // AdMob SDK başlat
+              MobileAds.initialize(this, initializationStatus -> {});
+              loadRewardedAd();
+
+              webView = new WebView(this);
+              setContentView(webView);
+              WebSettings s = webView.getSettings();
+              s.setJavaScriptEnabled(true);
+              s.setDomStorageEnabled(true);
+              s.setMediaPlaybackRequiresUserGesture(false);
+              webView.setWebViewClient(new WebViewClient());
+              webView.addJavascriptInterface(new WebAppInterface(this), "Android");
+              webView.loadUrl("file:///android_asset/index.html");
+            }
+
+            void loadRewardedAd() {
+              AdRequest adRequest = new AdRequest.Builder().build();
+              RewardedAd.load(this, AD_UNIT_ID, adRequest, new RewardedAdLoadCallback() {
+                @Override
+                public void onAdLoaded(RewardedAd ad) {
+                  rewardedAd = ad;
+                }
+                @Override
+                public void onAdFailedToLoad(LoadAdError adError) {
+                  rewardedAd = null;
+                }
+              });
+            }
+
+            void showRewardedAdInternal() {
+              if (rewardedAd == null) {
+                // Reklam henüz yüklenmediyse JS tarafına hemen ödülü ver (kullanıcıyı bekletmemek için)
+                // ve arka planda yeni reklam yüklemeyi dene
+                runOnUiThread(() -> webView.evaluateJavascript(
+                  "window._adRewardCallback && window._adRewardCallback();", null));
+                loadRewardedAd();
+                return;
+              }
+              rewardEarned = false;
+              rewardedAd.setFullScreenContentCallback(new FullScreenContentCallback() {
+                @Override
+                public void onAdDismissedFullScreenContent() {
+                  rewardedAd = null;
+                  loadRewardedAd();
+                  if (rewardEarned) {
+                    runOnUiThread(() -> webView.evaluateJavascript(
+                      "window._adRewardCallback && window._adRewardCallback();", null));
+                  }
+                }
+                @Override
+                public void onAdFailedToShowFullScreenContent(com.google.android.gms.ads.AdError adError) {
+                  rewardedAd = null;
+                  loadRewardedAd();
+                  // Gösterilemediyse de oyuncuyu mağdur etmemek için ödülü ver
+                  runOnUiThread(() -> webView.evaluateJavascript(
+                    "window._adRewardCallback && window._adRewardCallback();", null));
+                }
+              });
+              rewardedAd.show(this, (OnUserEarnedRewardListener) rewardItem -> {
+                rewardEarned = true;
+              });
+            }
+
+            public class WebAppInterface {
+              Activity ctx;
+              WebAppInterface(Activity c) { ctx = c; }
+
+              @JavascriptInterface
+              public void showRewardedAd() {
+                runOnUiThread(() -> showRewardedAdInternal());
+              }
+
+              @JavascriptInterface
+              public void hideStatusBar() {
+                // Zaten fullscreen flag ile gizli; JS tarafının beklediği no-op köprü
+              }
+            }
+
+            @Override
+            public void onBackPressed() {}
+          }
+          EOF
+
+      - name: Create AndroidManifest
+        run: |
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="com.google.android.gms.permission.AD_ID"/>
+            <application android:label="Neon Flap" android:allowBackup="false">
+              <meta-data
+                android:name="com.google.android.gms.ads.APPLICATION_ID"
+                android:value="ca-app-pub-4510153315383389~8747206361"/>
+              <activity android:name=".MainActivity"
+                android:exported="true"
+                android:screenOrientation="portrait"
+                android:configChanges="orientation|screenSize">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+
+      - name: Create build.gradle
+        run: |
+          cat > build.gradle << 'EOF'
+          buildscript {
+            repositories { google(); mavenCentral() }
+            dependencies { classpath 'com.android.tools.build:gradle:8.1.0' }
+          }
+          allprojects {
+            repositories { google(); mavenCentral() }
+          }
+          EOF
+          cat > app/build.gradle << 'EOF'
+          apply plugin: 'com.android.application'
+          android {
+            namespace "com.neonflap.game"
+            compileSdk 34
+            defaultConfig {
+              applicationId "com.neonflap.game"
+              minSdk 21
+              targetSdk 34
+              versionCode 1
+              versionName "1.0"
+            }
+            buildTypes {
+              release { minifyEnabled false }
+            }
+          }
+          dependencies {
+            implementation 'com.google.android.gms:play-services-ads:23.6.0'
+          }
+          EOF
+          cat > settings.gradle << 'EOF'
+          include ':app'
+          EOF
+          cat > gradle.properties << 'EOF'
+          android.useAndroidX=true
+          EOF
+
+      - name: Setup Gradle
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.1-bin.zip
+          unzip -q gradle-8.1-bin.zip
+
+      - name: Build APK
+        run: |
+          export PATH=$PATH:$PWD/gradle-8.1/bin
+          gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: neon-flap-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
